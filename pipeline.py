@@ -62,18 +62,27 @@ Context Relevancy: <score>
 def _get_clients():
     from openai import OpenAI
 
+    hf_key   = ""
+    groq_key = ""
+
     try:
         import streamlit as st
-        hf_key   = str(st.secrets["HF_TOKEN"])
-        groq_key = str(st.secrets["GROQ_API_KEY"])
+        hf_raw   = st.secrets["HF_TOKEN"]
+        groq_raw = st.secrets["GROQ_API_KEY"]
+        hf_key   = hf_raw if isinstance(hf_raw, str) else str(hf_raw)
+        groq_key = groq_raw if isinstance(groq_raw, str) else str(groq_raw)
     except Exception:
-        hf_key   = os.getenv("HF_TOKEN", "")
+        pass
+
+    if not hf_key:
+        hf_key = os.getenv("HF_TOKEN", "")
+    if not groq_key:
         groq_key = os.getenv("GROQ_API_KEY", "")
 
     if not hf_key:
-        raise ValueError("HF_TOKEN secret is missing or empty")
+        raise ValueError("HF_TOKEN is missing")
     if not groq_key:
-        raise ValueError("GROQ_API_KEY secret is missing or empty")
+        raise ValueError("GROQ_API_KEY is missing")
 
     hf_client = OpenAI(
         base_url="https://router.huggingface.co/v1",
@@ -90,57 +99,90 @@ def _get_clients():
 # GLOBALS
 # ─────────────────────────────────────────────────────────────
 
-_splits    = None
-_faiss     = None
-_bm25      = None
+_splits     = None
+_faiss      = None
+_bm25       = None
 _embeddings = None
-_reranker  = None
+_reranker   = None
 
 # ─────────────────────────────────────────────────────────────
 # RETRIEVER
 # ─────────────────────────────────────────────────────────────
 
+def _parse_chunk(c, index: int):
+    """
+    Safely parse a chunk regardless of whether chunks.json stores
+    dicts  {"text": "...", "page": N}
+    or plain strings "..."
+    """
+    from langchain_core.documents import Document
+
+    if isinstance(c, dict):
+        text = c.get("text") or c.get("content") or c.get("page_content") or str(c)
+        page = c.get("page") or c.get("page_number") or "?"
+    elif isinstance(c, str):
+        text = c
+        page = "?"
+    else:
+        text = str(c)
+        page = "?"
+
+    return Document(page_content=text, metadata={"page": page, "index": index})
+
+
 def _build_retriever():
     global _splits, _faiss, _bm25, _embeddings
 
     import faiss
-    from rank_bm25 import BM25Okapi
-    from langchain_core.documents import Document
     from langchain_huggingface import HuggingFaceEmbeddings
 
-    if not os.path.exists(CHUNKS_PATH):
-        raise FileNotFoundError(f"chunks.json missing from {DATA_DIR}")
-    if not os.path.exists(FAISS_PATH):
-        raise FileNotFoundError(f"faiss.index missing from {DATA_DIR}")
-    if not os.path.exists(BM25_PATH):
-        raise FileNotFoundError(f"bm25.pkl missing from {DATA_DIR}")
+    # ── sanity checks ──────────────────────────────────────────
+    missing = []
+    for label, path in [
+        ("chunks.json", CHUNKS_PATH),
+        ("faiss.index", FAISS_PATH),
+        ("bm25.pkl",    BM25_PATH),
+    ]:
+        if not os.path.exists(path):
+            missing.append(f"{label} not found at {path}")
 
-    with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
-        chunks = json.load(f)
-
-    _splits = [
-        Document(
-            page_content=c["text"],
-            metadata={"page": c["page"]}
+    if missing:
+        raise FileNotFoundError(
+            "Missing data files:\n" + "\n".join(missing) +
+            f"\n\ndata/ contents: {os.listdir(DATA_DIR) if os.path.exists(DATA_DIR) else 'DATA_DIR MISSING'}"
         )
-        for c in chunks
-    ]
 
+    # ── load chunks ────────────────────────────────────────────
+    with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    # raw can be a list of dicts OR a list of strings OR a dict wrapper
+    if isinstance(raw, dict):
+        # e.g. {"chunks": [...]}
+        candidates = raw.get("chunks") or raw.get("data") or list(raw.values())[0]
+    elif isinstance(raw, list):
+        candidates = raw
+    else:
+        raise ValueError(f"Unexpected chunks.json format: {type(raw)}")
+
+    _splits = [_parse_chunk(c, i) for i, c in enumerate(candidates)]
+
+    if not _splits:
+        raise ValueError("chunks.json parsed to 0 documents — check the file format.")
+
+    # ── embeddings ─────────────────────────────────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     _embeddings = HuggingFaceEmbeddings(
         model_name=EMBED_ID,
-        model_kwargs={
-            "device": device,
-            "trust_remote_code": True,
-        },
-        encode_kwargs={
-            "normalize_embeddings": True,
-        },
+        model_kwargs={"device": device, "trust_remote_code": True},
+        encode_kwargs={"normalize_embeddings": True},
     )
 
+    # ── FAISS ──────────────────────────────────────────────────
     _faiss = faiss.read_index(FAISS_PATH)
 
+    # ── BM25 ───────────────────────────────────────────────────
     with open(BM25_PATH, "rb") as f:
         _bm25 = pickle.load(f)
 
@@ -158,9 +200,7 @@ def _get_reranker():
 
     if _reranker is None:
         from sentence_transformers import CrossEncoder
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
+        device    = "cuda" if torch.cuda.is_available() else "cpu"
         _reranker = CrossEncoder(RERANK_ID, device=device)
 
     return _reranker
@@ -173,16 +213,15 @@ def retrieve_and_rerank(query: str):
     splits   = _get_retriever()
     reranker = _get_reranker()
 
-    bm25_scores = _bm25.get_scores(query.split())
-    top_idx     = np.argsort(bm25_scores)[::-1][:10]
+    bm25_scores  = _bm25.get_scores(query.split())
+    top_idx      = np.argsort(bm25_scores)[::-1][:10]
     initial_docs = [splits[i] for i in top_idx]
 
-    scores = reranker.predict([[query, d.page_content] for d in initial_docs])
-    ranked  = sorted(zip(initial_docs, scores), key=lambda x: x[1], reverse=True)
+    scores   = reranker.predict([[query, d.page_content] for d in initial_docs])
+    ranked   = sorted(zip(initial_docs, scores), key=lambda x: x[1], reverse=True)
     top_docs = [d for d, _ in ranked[:3]]
 
-    context = "\n\n---\n\n".join([d.page_content for d in top_docs])
-
+    context    = "\n\n---\n\n".join([d.page_content for d in top_docs])
     chunk_list = [
         {"page": d.metadata.get("page", "?"), "text": d.page_content}
         for d in top_docs
