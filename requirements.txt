@@ -1,0 +1,17 @@
+streamlit==1.41.0
+langchain==0.3.25
+langchain-community==0.3.24
+langchain-huggingface==0.1.2
+langchain-core==0.3.60
+langchain-text-splitters==0.3.8
+faiss-cpu==1.9.0
+sentence-transformers==3.4.1
+rank_bm25==0.2.2
+pymupdf4llm==0.0.17
+openai==1.82.0
+transformers==4.51.3
+accelerate==1.6.0
+torch==2.6.0
+tokenizers
+einops
+numpy
