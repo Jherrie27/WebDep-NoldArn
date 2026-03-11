@@ -110,15 +110,15 @@ _reranker   = None
 # ─────────────────────────────────────────────────────────────
 
 def _parse_chunk(c, index: int):
-    """
-    Safely parse a chunk regardless of whether chunks.json stores
-    dicts  {"text": "...", "page": N}
-    or plain strings "..."
-    """
     from langchain_core.documents import Document
 
     if isinstance(c, dict):
-        text = c.get("text") or c.get("content") or c.get("page_content") or str(c)
+        text = (
+            c.get("text")
+            or c.get("content")
+            or c.get("page_content")
+            or str(c)
+        )
         page = c.get("page") or c.get("page_number") or "?"
     elif isinstance(c, str):
         text = c
@@ -147,19 +147,24 @@ def _build_retriever():
             missing.append(f"{label} not found at {path}")
 
     if missing:
+        data_contents = (
+            os.listdir(DATA_DIR) if os.path.exists(DATA_DIR) else "DATA_DIR MISSING"
+        )
         raise FileNotFoundError(
             "Missing data files:\n" + "\n".join(missing) +
-            f"\n\ndata/ contents: {os.listdir(DATA_DIR) if os.path.exists(DATA_DIR) else 'DATA_DIR MISSING'}"
+            f"\n\ndata/ contents: {data_contents}"
         )
 
     # ── load chunks ────────────────────────────────────────────
     with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
         raw = json.load(f)
 
-    # raw can be a list of dicts OR a list of strings OR a dict wrapper
     if isinstance(raw, dict):
-        # e.g. {"chunks": [...]}
-        candidates = raw.get("chunks") or raw.get("data") or list(raw.values())[0]
+        candidates = (
+            raw.get("chunks")
+            or raw.get("data")
+            or list(raw.values())[0]
+        )
     elif isinstance(raw, list):
         candidates = raw
     else:
@@ -168,7 +173,7 @@ def _build_retriever():
     _splits = [_parse_chunk(c, i) for i, c in enumerate(candidates)]
 
     if not _splits:
-        raise ValueError("chunks.json parsed to 0 documents — check the file format.")
+        raise ValueError("chunks.json parsed to 0 documents.")
 
     # ── embeddings ─────────────────────────────────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -285,7 +290,7 @@ def generate_answer(query: str, history=None):
         hist = "\n".join(
             [f"User:{h['user']}\nBot:{h['assistant']}" for h in history[-3:]]
         )
-        condensed    = _generate(
+        condensed = _generate(
             hf_client,
             QWEN_MODEL,
             CONDENSE_SYSTEM,
