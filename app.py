@@ -163,7 +163,7 @@ with st.sidebar:
 # MAIN
 # =============================================================================
 
-st.title("🌿 Philippine Family Planning Handbook Bot")
+st.title("Philippine Family Planning Handbook Bot")
 st.caption("Powered by Qwen3-4B · Hybrid BM25 + FAISS · BGE Reranker · Groq")
 
 if startup_error:
@@ -274,3 +274,4 @@ if st.session_state.chat_history:
 
 else:
     st.info("Ask a question above to begin.")
+
